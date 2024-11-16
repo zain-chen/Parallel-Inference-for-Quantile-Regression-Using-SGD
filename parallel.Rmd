@@ -1,0 +1,152 @@
+---
+title: "SsubGD Parallel"
+author: "Zhiyuan Chen"
+editor: visual
+output:
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+## Parameters
+
+```{r}
+library(mvtnorm)
+library(conquer)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(pbapply)
+set.seed(911)
+gamma_0 = 1
+alpha = 0.05
+a = 0.501
+rep_times = 1000
+tau = 0.5
+K = 4
+```
+
+## Functions
+
+```{r}
+# SubGD + Parallel
+parallel_sSubGD <- function(x, y, tau, alpha, gamma_0, a, K) {
+  N <- nrow(x)
+  d <- ncol(x) - 1
+  n <- N / K  # Number of samples per batch
+  
+  # init
+  order <- sample(1:n)
+  beta <- as.numeric(conquer(x[,2:(d+1)], y, tau = tau)$coef) # no observations burn
+  
+  # Split data into K batches
+  batch_indices <- split(sample(1:N), rep(1:K, each = n, length.out = N))
+  
+  # Set up parallel backend
+  num_cores <- min(detectCores() - 1, K)  # Use min to avoid using more cores than batches
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
+  
+  # Perform parallel computation
+  beta_bar_s <- foreach(k = 1:K, .combine = rbind, .packages = "stats") %dopar% {
+    batch <- batch_indices[[k]]
+    x_batch <- x[batch, ]
+    y_batch <- y[batch]
+    beta_bar <- beta
+    
+    for (t in 1:n) {
+      gamma <- gamma_0 * t^(-a)
+      i <- order[t]
+      subgradient <- x_batch[i, ] * (as.numeric(y_batch[i] <= crossprod(x_batch[i, ], beta)) - tau)
+      beta <- beta - gamma * subgradient
+      beta_bar <- (beta_bar * (i - 1) + beta) / i
+    }
+    return(beta_bar)
+  }
+  
+  # Stop the cluster
+  stopCluster(cl)
+  
+  return(beta_bar_s)
+}
+
+# Simulation function & inference
+simu.inference <- function(N, d, rep_times){
+  ci_lengths <- numeric(length = rep_times)
+  cover_rates <- numeric(length = rep_times)
+  times <- numeric(length = rep_times)
+  
+  for(iter in 1:rep_times){
+    # data
+    cat("Running simulation for iteration =", iter, ", N =", N, "and d =", d, "\n")
+    x <- rmvnorm(N, rep(0,d), diag(d))
+    x <- cbind(1, x)
+    beta <- rep(1, d+1)
+    epsilon <- rnorm(N)
+    y <- x %*% beta + epsilon
+    
+    start_time <- Sys.time()
+    beta_bar_s <- parallel_sSubGD(x, y, tau, alpha, gamma_0, a, K)
+    end_time <- Sys.time()
+    times[iter] <- as.numeric(difftime(end_time, start_time, units = "secs"))
+  
+    # ci length, coverage rate and relative error
+    beta_bar_K <- colMeans(beta_bar_s)                      # Average beta_bar across all K
+    v <- c(1, rep(0, d))
+    sigma_v_squared <- sum(((beta_bar_s-beta_bar_K)%*%v)^2) / (K-1)
+    t_value <- qt(1 - alpha / 2, df = K - 1)
+    ci_length <- 2 * t_value * sqrt(sigma_v_squared) / sqrt(K)
+    upper <- v %*% beta_bar_K + ci_length/2
+    lower <- v %*% beta_bar_K - ci_length/2
+    ci_lengths[iter] <- ci_length
+    cover_rates[iter] <- mean(lower <= 1 & 1 <= upper)
+  }
+  result <- list(
+    time = mean(times),
+    ci_length = mean(ci_lengths),
+    cover_rate = mean(cover_rates),
+    relative_error = abs((mean(cover_rates)-(1-alpha))/alpha)
+  )
+  
+  return(result)
+}
+```
+
+## Simulations
+
+```{r include=FALSE}
+results <- list()
+d_list <- c(10, 20, 40, 80, 160, 320, 500, 1000)
+N <- 1e5
+results <- pblapply(d_list, function(d) {
+  result <- simu.inference(N, d, rep_times)
+  return(result)
+})
+
+names(results) <- paste0("d_", d_list)
+saveRDS(results, file = "simulation_results.rds")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
